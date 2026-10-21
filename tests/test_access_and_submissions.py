@@ -80,6 +80,76 @@ def test_cross_origin_or_rebound_host_cannot_call_local_api(local_project, heade
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("origin", ["http://127.0.0.1"])
+def test_port_stripped_origin_accepted_only_with_same_origin_fetch_metadata(
+        local_project, origin):
+    """Some Chromium builds and proxy extensions drop the non-default port.
+
+    `Origin: http://127.0.0.1` for a page served from `http://127.0.0.1:8000`
+    is same-origin, and the browser still reports `Sec-Fetch-Site:
+    same-origin`. Page script cannot forge that header, so honour it — but only
+    when the scheme and host match and no explicit port was sent.
+    """
+    async def scenario():
+        async with client(base="http://127.0.0.1:8000") as http:
+            ok = await http.get("/api/settings", headers={
+                "Origin": origin, "Sec-Fetch-Site": "same-origin"})
+            assert ok.status_code == 200, ok.text
+            # Without the browser-set header the stripped port stays untrusted.
+            bare = await http.get("/api/settings", headers={"Origin": origin})
+            assert bare.status_code == 403, bare.text
+            for site in ("cross-site", "same-site", "none"):
+                rejected = await http.get("/api/settings", headers={
+                    "Origin": origin, "Sec-Fetch-Site": site})
+                assert rejected.status_code == 403, site
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("headers", [
+    # A foreign host that merely omits the port is still cross-origin.
+    {"Origin": "http://evil.example", "Sec-Fetch-Site": "same-origin"},
+    # An explicit different port is a different origin.
+    {"Origin": "http://127.0.0.1:9000", "Sec-Fetch-Site": "same-origin"},
+    # Scheme downgrade/upgrade must not be waved through.
+    {"Origin": "https://127.0.0.1", "Sec-Fetch-Site": "same-origin"},
+    # Opaque origins never match.
+    {"Origin": "null", "Sec-Fetch-Site": "same-origin"},
+    # localhost and 127.0.0.1 are different hosts, so different origins.
+    {"Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"},
+    # Userinfo and paths make the value a non-origin, not an origin.
+    {"Origin": "http://u:p@127.0.0.1", "Sec-Fetch-Site": "same-origin"},
+    {"Origin": "http://127.0.0.1/api/x", "Sec-Fetch-Site": "same-origin"},
+])
+def test_port_stripped_origin_tolerance_keeps_csrf_boundary(local_project, headers):
+    async def scenario():
+        async with client(base="http://127.0.0.1:8000") as http:
+            response = await http.get("/api/notifications", headers=headers)
+            assert response.status_code == 403
+    asyncio.run(scenario())
+
+
+def test_local_file_action_accepts_port_stripped_origin(local_project):
+    """`_require_local_action` must follow the same origin rules as the API."""
+    async def scenario():
+        async with client(base="http://127.0.0.1:8000") as http:
+            accepted = await http.post("/api/contents/1/reveal", headers={
+                "Origin": "http://127.0.0.1",
+                "Sec-Fetch-Site": "same-origin",
+                "X-CreatorHub-Local-Action": "reveal",
+            })
+            # 404 means the request passed the guard and only the row is missing.
+            assert accepted.status_code == 404, accepted.text
+            for headers in (
+                {"Origin": "http://evil.example", "Sec-Fetch-Site": "same-origin"},
+                {"Origin": "http://127.0.0.1"},
+                {"Origin": "http://127.0.0.1", "Sec-Fetch-Site": "cross-site"},
+            ):
+                denied = await http.post("/api/contents/1/reveal", headers={
+                    **headers, "X-CreatorHub-Local-Action": "reveal"})
+                assert denied.status_code == 403, headers
+    asyncio.run(scenario())
+
+
 def test_local_origin_and_untrusted_forwarding(local_project):
     local_project.cfg.server.host = "0.0.0.0"
     async def scenario():

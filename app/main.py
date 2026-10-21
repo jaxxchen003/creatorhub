@@ -126,7 +126,7 @@ from .transport_matrix import (
 )
 from .scheduling import parse_schedule, utc_iso
 from .engine.cadence import row_deadline
-from .local_access import LocalAccessMiddleware
+from .local_access import LocalAccessMiddleware, same_origin
 from .submissions import submit_once, replay_if_exists
 from .notification_config import parse_config, redact_config, merge_config, redact_detail
 from .windowing import (CHROMIUM_WINDOW_CLASSES, EXPLORER_WINDOW_CLASSES,
@@ -6319,16 +6319,9 @@ def _require_local_action(request: Request, action: str = "reveal") -> None:
 
     client_host = request.client.host if request.client else ""
     page_host = request.url.hostname or ""
-    try:
-        origin = urlsplit(request.headers.get("origin", ""))
-        same_origin = (origin.scheme == request.url.scheme and
-                       (origin.hostname or "").casefold() == page_host.casefold() and
-                       origin.port == request.url.port)
-    except ValueError:
-        same_origin = False
     local_action = request.headers.get("x-creatorhub-local-action") == action
     if not is_loopback(client_host) or not is_loopback(page_host) or \
-            not same_origin or not local_action:
+            not local_action or not same_origin(request, request.headers.get("origin", "")):
         raise HTTPException(403, "仅允许从本机 CreatorHub 页面执行文件操作")
 
 

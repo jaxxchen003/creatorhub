@@ -27,18 +27,45 @@ def local_request(request: Request) -> bool:
                 and loopback(request.url.hostname or ""))
 
 
-def _same_origin(request: Request, value: str) -> bool:
+def same_origin(request: Request, value: str) -> bool:
+    """True when an Origin/Referer-style value may be trusted for this request.
+
+    Two cases are accepted:
+
+    1. The value is a strict origin (no credentials, path, query or fragment)
+       whose scheme/host/port equal the request's own.
+    2. The value omits its port while the browser reports
+       ``Sec-Fetch-Site: same-origin`` for the request. Several Chromium builds
+       and proxy extensions strip a non-default port from ``Origin`` (e.g.
+       ``Origin: http://127.0.0.1`` for a page served from
+       ``http://127.0.0.1:8000``). ``Sec-Fetch-Site`` is set by the browser and
+       cannot be forged by page script, so honouring it keeps the CSRF boundary
+       intact while letting those clients through.
+
+    Anything else — foreign hosts, explicit non-default ports, ``null``
+    origins, userinfo, or paths — is rejected.
+    """
     try:
         origin, target = urlsplit(value), urlsplit(str(request.url))
         def identity(url):
             return (url.scheme, (url.hostname or "").lower(),
                     url.port or (443 if url.scheme == "https" else 80))
-        return (not origin.username and not origin.password
+        if not (not origin.username and not origin.password
                 and origin.scheme in {"http", "https"}
-                and origin.path in {"", "/"} and not origin.query and not origin.fragment
-                and identity(origin) == identity(target))
+                and origin.path in {"", "/"} and not origin.query and not origin.fragment):
+            return False
+        if identity(origin) == identity(target):
+            return True
+        return (not origin.port
+                and request.headers.get("sec-fetch-site", "").lower() == "same-origin"
+                and origin.scheme == target.scheme
+                and (origin.hostname or "").lower() == (target.hostname or "").lower())
     except ValueError:
         return False
+
+
+# Kept for callers that imported the older private name.
+_same_origin = same_origin
 
 
 class LocalAccessMiddleware:
@@ -62,7 +89,7 @@ class LocalAccessMiddleware:
         if not valid_local:
             error = "当前工作台仅供本机使用，请通过 127.0.0.1 或 localhost 访问"
         elif api and (request.headers.get("sec-fetch-site", "") in {"cross-site", "same-site"}
-                      or ("origin" in request.headers and not _same_origin(request, request.headers["origin"]))):
+                      or ("origin" in request.headers and not same_origin(request, request.headers["origin"]))):
             error = "请从 CreatorHub 同源页面发起请求"
         if error:
             await JSONResponse({"detail": error}, status_code=403,
